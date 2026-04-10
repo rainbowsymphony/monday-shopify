@@ -18,7 +18,7 @@ async function mondayQuery(query, variables = {}) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: MONDAY_API_KEY,
+      Authorization: "Bearer " + MONDAY_API_KEY,
       "API-Version": "2024-01",
     },
     body: JSON.stringify({ query, variables }),
