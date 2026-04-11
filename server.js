@@ -38,7 +38,7 @@ async function shopifyPost(path, body) {
   return res.json();
 }
 
-async function getSubitem(subitemId) {
+async function getParentItem(itemId) {
   const data = await mondayQuery(`
     query($id: [ID!]!) {
       items(ids: $id) {
@@ -49,7 +49,7 @@ async function getSubitem(subitemId) {
           text
           value
         }
-        parent_item {
+        subitems {
           id
           name
           column_values {
@@ -60,7 +60,7 @@ async function getSubitem(subitemId) {
         }
       }
     }
-  `, { id: [String(subitemId)] });
+  `, { id: [String(itemId)] });
   return data?.items?.[0];
 }
 
@@ -78,17 +78,14 @@ async function findCustomer(email) {
   return json.customers?.[0] || null;
 }
 
-async function buildDraftOrder(subitem) {
+function buildLineItem(subitem) {
   const sc = subitem.column_values;
-  const pc = subitem.parent_item?.column_values;
 
   const title = subitem.name;
-
   const qty = parseInt(col(sc, "text") || "1", 10) || 1;
   const rawPrice = col(sc, "numbers") || "0";
   const price = parseFloat(rawPrice.replace(/[^0-9.]/g, "")).toFixed(2);
 
-  const artworkTitle = subitem.name;
   const materialType = col(sc, "dropdown4");
   const sizeText = col(sc, "text52");
   const sizeNum = col(sc, "numbers4");
@@ -97,7 +94,7 @@ async function buildDraftOrder(subitem) {
   const finish = col(sc, "dropdown5");
 
   const notes = [
-    `Artwork Title: ${artworkTitle}`,
+    `Artwork Title: ${title}`,
     materialType ? `Material Type: ${materialType}` : null,
     (sizeText || sizeNum) ? `Size: ${sizeText} x ${sizeNum}` : null,
     shape ? `Shape: ${shape}` : null,
@@ -105,31 +102,62 @@ async function buildDraftOrder(subitem) {
     finish ? `Finish: ${finish}` : null,
   ].filter(Boolean).join("\n");
 
-  const customerName = subitem.parent_item?.name || "";
-  const nameParts = customerName.split(" ");
+  return {
+    title,
+    quantity: qty,
+    price,
+    properties: [
+      { name: "Artwork Title", value: title },
+      materialType ? { name: "Material Type", value: materialType } : null,
+      (sizeText || sizeNum) ? { name: "Size", value: `${sizeText} x ${sizeNum}` } : null,
+      shape ? { name: "Shape", value: shape } : null,
+      pattern ? { name: "Pattern", value: pattern } : null,
+      finish ? { name: "Finish", value: finish } : null,
+    ].filter(Boolean),
+    _notes: notes,
+  };
+}
+
+async function buildDraftOrder(parentItem) {
+  const pc = parentItem.column_values;
+
+  // Customer info from parent item
+  const customerName = parentItem.name || "";
+  const nameParts = customerName.trim().split(" ");
   const firstName = nameParts[0] || "";
   const lastName = nameParts.slice(1).join(" ") || "";
   const email = col(pc, "email7") || "";
 
+  // Find existing Shopify customer by email
   const customer = await findCustomer(email);
+
+  // Build one line item per subitem
+  const subitems = parentItem.subitems || [];
+  console.log(`[monday] Found ${subitems.length} subitems`);
+
+  const lineItems = subitems.map(buildLineItem);
+
+  // Combine all subitem notes into one draft order note
+  const combinedNotes = lineItems.map((li, i) =>
+    `--- Item ${i + 1} ---\n${li._notes}`
+  ).join("\n\n");
+
+  // Remove internal _notes before sending to Shopify
+  const cleanLineItems = lineItems.map(({ _notes, ...rest }) => rest);
 
   return {
     draft_order: {
-      line_items: [{
-        title,
-        quantity: qty,
-        price,
-      }],
+      line_items: cleanLineItems,
       customer: customer ? { id: customer.id } : undefined,
       email: email || undefined,
       shipping_address: (!customer && firstName) ? {
         first_name: firstName,
         last_name: lastName,
       } : undefined,
-      note: notes,
+      note: combinedNotes,
       note_attributes: [
-        { name: "monday_subitem_id", value: String(subitem.id) },
-        { name: "monday_parent", value: subitem.parent_item?.name || "" },
+        { name: "monday_item_id", value: String(parentItem.id) },
+        { name: "monday_customer", value: customerName },
       ],
     },
   };
@@ -155,16 +183,16 @@ app.post("/webhook", async (req, res) => {
     }
   }
 
-  console.log(`[webhook] Triggered for subitem ${pulseId}`);
+  console.log(`[webhook] Triggered for item ${pulseId}`);
 
   try {
-    const subitem = await getSubitem(pulseId);
-    if (!subitem) throw new Error(`Subitem ${pulseId} not found`);
+    const parentItem = await getParentItem(pulseId);
+    if (!parentItem) throw new Error(`Item ${pulseId} not found`);
 
-    console.log("[monday] Subitem name:", subitem.name);
-    console.log("[monday] Columns:", JSON.stringify(subitem.column_values));
+    console.log("[monday] Parent item:", parentItem.name);
+    console.log("[monday] Parent columns:", JSON.stringify(parentItem.column_values));
 
-    const draftPayload = await buildDraftOrder(subitem);
+    const draftPayload = await buildDraftOrder(parentItem);
     console.log("[shopify] Creating draft order:", JSON.stringify(draftPayload, null, 2));
 
     const result = await shopifyPost("/draft_orders.json", draftPayload);
