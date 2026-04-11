@@ -1,12 +1,10 @@
 import express from "express";
-import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
 const {
   MONDAY_API_KEY,
-  MONDAY_SIGNING_SECRET,
   SHOPIFY_STORE,
   SHOPIFY_ACCESS_TOKEN,
   TRIGGER_STATUS,
@@ -46,11 +44,19 @@ async function getSubitem(subitemId) {
       items(ids: $id) {
         id
         name
-        column_values { id title text value }
+        column_values {
+          id
+          text
+          value
+        }
         parent_item {
           id
           name
-          column_values { id title text }
+          column_values {
+            id
+            text
+            value
+          }
         }
       }
     }
@@ -58,9 +64,8 @@ async function getSubitem(subitemId) {
   return data?.items?.[0];
 }
 
-function val(columns, titleOrId) {
-  const t = titleOrId.toLowerCase();
-  return columns?.find(c => c.title?.toLowerCase() === t || c.id?.toLowerCase() === t)?.text?.trim() || "";
+function col(columns, id) {
+  return columns?.find(c => c.id === id)?.text?.trim() || "";
 }
 
 async function findCustomer(email) {
@@ -77,51 +82,54 @@ async function buildDraftOrder(subitem) {
   const sc = subitem.column_values;
   const pc = subitem.parent_item?.column_values;
 
-  const title     = subitem.name;
-  const qty       = parseInt(val(sc, "Quantity") || val(sc, "Qty") || "1", 10) || 1;
-  const price     = val(sc, "Price") || val(sc, "Unit Price") || "0.00";
-  const discount  = val(sc, "Discount") || "";
-  const notes     = val(sc, "Notes") || val(sc, "Note") || "";
-  const tags      = val(sc, "Tags") || val(sc, "Tag") || "";
+  const title = subitem.name;
 
-  const email     = val(pc, "Email")      || val(sc, "Email") || "";
-  const phone     = val(pc, "Phone")      || val(sc, "Phone") || "";
-  const firstName = val(pc, "First Name") || val(sc, "First Name") || "";
-  const lastName  = val(pc, "Last Name")  || val(sc, "Last Name") || "";
-  const address1  = val(pc, "Address")    || val(sc, "Address") || "";
-  const city      = val(pc, "City")       || val(sc, "City") || "";
-  const province  = val(pc, "State")      || val(sc, "State") || "";
-  const zip       = val(pc, "Zip")        || val(sc, "Zip") || "";
-  const country   = val(pc, "Country")    || val(sc, "Country") || "US";
+  const qty = parseInt(col(sc, "text") || "1", 10) || 1;
+  const rawPrice = col(sc, "numbers") || "0";
+  const price = parseFloat(rawPrice.replace(/[^0-9.]/g, "")).toFixed(2);
+
+  const artworkTitle = subitem.name;
+  const materialType = col(sc, "dropdown4");
+  const sizeText = col(sc, "text52");
+  const sizeNum = col(sc, "numbers4");
+  const shape = col(sc, "dropdown0");
+  const pattern = col(sc, "dropdown6");
+  const finish = col(sc, "dropdown5");
+
+  const notes = [
+    `Artwork Title: ${artworkTitle}`,
+    materialType ? `Material Type: ${materialType}` : null,
+    (sizeText || sizeNum) ? `Size: ${sizeText} x ${sizeNum}` : null,
+    shape ? `Shape: ${shape}` : null,
+    pattern ? `Pattern: ${pattern}` : null,
+    finish ? `Finish: ${finish}` : null,
+  ].filter(Boolean).join("\n");
+
+  const customerName = subitem.parent_item?.name || "";
+  const nameParts = customerName.split(" ");
+  const firstName = nameParts[0] || "";
+  const lastName = nameParts.slice(1).join(" ") || "";
+  const email = col(pc, "email7") || "";
 
   const customer = await findCustomer(email);
-
-  const address = { first_name: firstName, last_name: lastName, address1, city, province, zip, country, phone };
-
-  const appliedDiscount = discount ? {
-    value_type: discount.includes("%") ? "percentage" : "fixed_amount",
-    value: parseFloat(discount.replace(/[^0-9.]/g, "")),
-    title: "Monday Discount",
-  } : undefined;
 
   return {
     draft_order: {
       line_items: [{
         title,
         quantity: qty,
-        price: parseFloat(price.replace(/[^0-9.]/g, "")).toFixed(2),
-        applied_discount: appliedDiscount,
+        price,
       }],
-      shipping_address: address.address1 ? address : undefined,
-      billing_address:  address.address1 ? address : undefined,
       customer: customer ? { id: customer.id } : undefined,
-      email:    email || undefined,
-      phone:    phone || undefined,
-      note:     notes || undefined,
-      tags:     tags || undefined,
+      email: email || undefined,
+      shipping_address: (!customer && firstName) ? {
+        first_name: firstName,
+        last_name: lastName,
+      } : undefined,
+      note: notes,
       note_attributes: [
-        { name: "monday_item_id", value: String(subitem.id) },
-        { name: "monday_parent",  value: subitem.parent_item?.name || "" },
+        { name: "monday_subitem_id", value: String(subitem.id) },
+        { name: "monday_parent", value: subitem.parent_item?.name || "" },
       ],
     },
   };
@@ -153,8 +161,11 @@ app.post("/webhook", async (req, res) => {
     const subitem = await getSubitem(pulseId);
     if (!subitem) throw new Error(`Subitem ${pulseId} not found`);
 
+    console.log("[monday] Subitem name:", subitem.name);
+    console.log("[monday] Columns:", JSON.stringify(subitem.column_values));
+
     const draftPayload = await buildDraftOrder(subitem);
-    console.log("[shopify] Creating draft order...");
+    console.log("[shopify] Creating draft order:", JSON.stringify(draftPayload, null, 2));
 
     const result = await shopifyPost("/draft_orders.json", draftPayload);
     if (result.errors || result.error) throw new Error(JSON.stringify(result.errors || result.error));
@@ -169,4 +180,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.get("/health", (_, res) => res.json({ ok: true }));
-app.listen(PORT, () => console.log(`Listening on port ${PORT}`)); 
+app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
