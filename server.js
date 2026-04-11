@@ -81,7 +81,9 @@ async function findCustomer(email) {
 function buildLineItem(subitem) {
   const sc = subitem.column_values;
 
-  const title = subitem.name;
+  const status = col(sc, "status8");
+  const title = status ? `${subitem.name} - ${status}` : subitem.name;
+
   const qty = parseInt(col(sc, "text") || "1", 10) || 1;
   const rawPrice = col(sc, "numbers") || "0";
   const price = parseFloat(rawPrice.replace(/[^0-9.]/g, "")).toFixed(2);
@@ -94,7 +96,7 @@ function buildLineItem(subitem) {
   const finish = col(sc, "dropdown5");
 
   const notes = [
-    `Artwork Title: ${title}`,
+    `Artwork Title: ${subitem.name}`,
     materialType ? `Material Type: ${materialType}` : null,
     (sizeText || sizeNum) ? `Size: ${sizeText} x ${sizeNum}` : null,
     shape ? `Shape: ${shape}` : null,
@@ -102,47 +104,29 @@ function buildLineItem(subitem) {
     finish ? `Finish: ${finish}` : null,
   ].filter(Boolean).join("\n");
 
-  return {
-    title,
-    quantity: qty,
-    price,
-    properties: [
-      { name: "Artwork Title", value: title },
-      materialType ? { name: "Material Type", value: materialType } : null,
-      (sizeText || sizeNum) ? { name: "Size", value: `${sizeText} x ${sizeNum}` } : null,
-      shape ? { name: "Shape", value: shape } : null,
-      pattern ? { name: "Pattern", value: pattern } : null,
-      finish ? { name: "Finish", value: finish } : null,
-    ].filter(Boolean),
-    _notes: notes,
-  };
+  return { title, quantity: qty, price, _notes: notes };
 }
 
 async function buildDraftOrder(parentItem) {
   const pc = parentItem.column_values;
 
-  // Customer info from parent item
   const customerName = parentItem.name || "";
   const nameParts = customerName.trim().split(" ");
   const firstName = nameParts[0] || "";
   const lastName = nameParts.slice(1).join(" ") || "";
   const email = col(pc, "email7") || "";
 
-  // Find existing Shopify customer by email
   const customer = await findCustomer(email);
 
-  // Build one line item per subitem
   const subitems = parentItem.subitems || [];
   console.log(`[monday] Found ${subitems.length} subitems`);
 
   const lineItems = subitems.map(buildLineItem);
 
-  // Combine all subitem notes into one draft order note
   const combinedNotes = lineItems.map((li, i) =>
     `--- Item ${i + 1} ---\n${li._notes}`
   ).join("\n\n");
 
-  // Remove internal _notes before sending to Shopify
   const cleanLineItems = lineItems.map(({ _notes, ...rest }) => rest);
 
   return {
@@ -190,7 +174,7 @@ app.post("/webhook", async (req, res) => {
     if (!parentItem) throw new Error(`Item ${pulseId} not found`);
 
     console.log("[monday] Parent item:", parentItem.name);
-    console.log("[monday] Parent columns:", JSON.stringify(parentItem.column_values));
+    console.log("[monday] Subitems:", JSON.stringify(parentItem.subitems));
 
     const draftPayload = await buildDraftOrder(parentItem);
     console.log("[shopify] Creating draft order:", JSON.stringify(draftPayload, null, 2));
@@ -208,4 +192,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.get("/health", (_, res) => res.json({ ok: true }));
-app.listen(PORT, () => console.log(`Listening on port ${PORT}`));//redeploy 
+app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
