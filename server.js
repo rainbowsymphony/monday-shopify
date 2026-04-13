@@ -104,7 +104,7 @@ function buildLineItem(subitem) {
     finish ? `Finish: ${finish}` : null,
   ].filter(Boolean).join("\n");
 
-  return { title, quantity: qty, price, _notes: notes };
+  return { title, quantity: qty, price, requires_shipping: true, _notes: notes };
 }
 
 async function buildDraftOrder(parentItem) {
